@@ -21,11 +21,12 @@
 
 Тема автоматически определяет дистрибутив и подставляет нужные иконки. Из коробки поддерживаются:
 
-| Дистрибутив | Иконки в `Matrix/icons/` |
-|-------------|--------------------------|
-| Arch Linux  | `arch_on.png`, `arch_off.png` |
-| Debian      | `debian_on.png`, `debian_off.png` |
-| Ubuntu      | `ubuntu_on.png`, `ubuntu_off.png` |
+| | |
+|:-------:|:-------:|
+|<img src="../Matrix/icons/debian_on.png" width="247"><br><img src="../Matrix/icons/debian_off.png" width="247">|**Debian** — `debian_on.png` / `debian_off.png`|
+|<img src="../Matrix/icons/arch_on.png" width="247"><br><img src="../Matrix/icons/arch_off.png" width="247">|**Arch** — `arch_on.png` / `arch_off.png`|
+|<img src="../Matrix/icons/ubuntu_on.png" width="247"><br><img src="../Matrix/icons/ubuntu_off.png" width="247">|**Ubuntu** — `ubuntu_on.png` / `ubuntu_off.png`|
+|<img src="../assets/linux_template.png" width="247"><br><img src="../assets/windows_template.png" width="247">|**Шаблоны** — `linux_template.png` / `windows_template.png`|
 
 ### Добавление своего дистрибутива
 
