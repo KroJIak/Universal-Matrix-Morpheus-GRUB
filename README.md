@@ -68,22 +68,28 @@ These templates are used as fallback when no dedicated icons exist for your dist
    ```
 
 4. During installation you will be asked:
-   - **1) Auto-detect** — Automatically detect the distribution
-   - **2) Select manually** — Choose the distribution by number from the list
+   - **Screen resolution** — HD, Full HD, 2K, or 4K (fixes small/big loader on high-DPI displays)
+   - **Linux/Windows identification** — Only if auto-detect fails: which menu entry is Linux and which is Windows
+   - **Distribution for icons** — Only if the Linux distro wasn't found: select from the list
 
-5. Reboot to see the theme.
+5. **Important:** The theme is designed for exactly **2 boot entries** (e.g. your Linux distro + Windows). If you have more (UEFI Settings, Advanced options, etc.), the installer will explain how to reduce them.
+
+6. The installer also hides the brief blue Debian/Ubuntu loading screen and "Loading Linux..." text during boot, using a black background and quiet mode.
+
+7. Reboot to see the theme.
 
 ---
 
 ## Icon Selection Logic
 
-1. Distributions are read from `distros.conf` in priority order (top to bottom)
-2. A substring match is performed against `GRUB_DISTRIBUTOR` / `ID` from `/etc/os-release`
-3. Presence of `{name}_on.png` and `{name}_off.png` in `Matrix/icons/` is checked
-4. If a match is found — those icons are used
-5. If not — `assets/linux_template.png` is used as fallback
+After confirming there are only 2 boot entries, the script auto-detects everything:
 
-If only Windows is installed (no Linux), `linux_template.png` is used as a non-booting placeholder and `windows_template.png` for booting Windows. If neither OS is found, both options remain placeholders.
+1. **Linux vs Windows** — Identifies which menu entry is Linux and which is Windows (by GRUB classes and titles)
+2. **Linux distro** — Matches against `distros.conf` (entry classes, titles, and `/etc/os-release`)
+3. Questions are asked **only when auto-detect fails**: which entry is Linux/Windows, or which distro icons to use
+4. Fallback: `assets/linux_template.png` if no distro match is found
+
+If only Windows is installed, `linux_template.png` is used as a non-booting placeholder and `windows_template.png` for Windows.
 
 ---
 
@@ -99,6 +105,7 @@ If only Windows is installed (no Linux), `linux_template.png` is used as a non-b
 ├── assets/
 │   ├── linux_template.png
 │   ├── windows_template.png
+│   ├── black.png            # 1x1 black pixel for boot transition
 │   ├── linux.psd
 │   └── windows.psd
 ├── distros.conf        # Distribution config and priorities
@@ -112,7 +119,7 @@ If only Windows is installed (no Linux), `linux_template.png` is used as a non-b
 
 ## Simplifying the GRUB Menu
 
-The theme works best with a minimal menu (e.g. one Linux and one Windows entry). Extra entries like "Advanced options" or "UEFI Firmware Settings" can be disabled in `/etc/default/grub` or in scripts under `/etc/grub.d/`.
+The theme works **only with 2 boot entries** — one for Linux, one for Windows. If you have more entries (e.g. "Advanced options", "UEFI Firmware Settings", multiple distros), the installer will exit and explain how to reduce them. Edit `/etc/default/grub` and scripts in `/etc/grub.d/`, then run `update-grub` and try again.
 
 ---
 

@@ -14,6 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ICONS_SRC="${SCRIPT_DIR}/${THEME_NAME}/icons"
 ASSETS_DIR="${SCRIPT_DIR}/assets"
 DISTROS_CONF="${SCRIPT_DIR}/distros.conf"
+GRUB_CHECK_CFG="/tmp/grub_matrix_check.cfg"
 
 echo ""
 echo "================================"
@@ -33,7 +34,6 @@ get_system_distro_id() {
     if [ -f /etc/os-release ]; then
         id=$(grep -E "^ID=|^NAME=" /etc/os-release | head -2 | cut -d= -f2 | tr -d '"' | tr '\n' ' ')
     fi
-    # GRUB_DISTRIBUTOR is often `lsb_release -i -s` - get actual value
     local grub_dist
     grub_dist=$(lsb_release -i -s 2>/dev/null || true)
     [ -z "$grub_dist" ] && grub_dist="Debian"
@@ -67,35 +67,69 @@ list_available_distros() {
         if [[ -f "${ICONS_SRC}/${icon_on}" && -f "${ICONS_SRC}/${icon_off}" ]]; then
             DISTROS_ARR+=("$keyword")
             echo "  $i) $keyword"
-            ((i++))
+            i=$((i+1))
         fi
     done < "$DISTROS_CONF"
 }
 
-# Get Linux class from grub.cfg (distro-specific class from first Linux menuentry)
-get_linux_class_from_grub() {
-    local grub_file="${1:-/tmp/grub_matrix_check.cfg}"
-    if [ ! -f "$grub_file" ]; then
-        grub-mkconfig 2>/dev/null > "$grub_file" || true
-    fi
-    # GRUB uses: --class debian --class gnu-linux ... ; we want the distro (debian/arch/ubuntu)
-    local line
-    line=$(grep -E "menuentry.*--class.*gnu-linux" "$grub_file" 2>/dev/null | head -1)
-    for cls in $(echo "$line" | grep -oE '\-\-class [a-z0-9_-]+' | awk '{print $2}'); do
-        case "$cls" in gnu-linux|gnu|os) ;; *) echo "$cls"; return ;; esac
-    done
-}
-
-# Check if grub has Windows entry
-has_windows_entry() {
-    local grub_file="${1:-/tmp/grub_matrix_check.cfg}"
-    grep -iE "menuentry.*[Ww]indows" "$grub_file" 2>/dev/null | head -1 | grep -q .
-}
-
-# Count top-level menuentries (at start of line, excluding those inside submenus)
+# Count top-level menuentries (no leading space = top-level, not inside submenu)
 count_menu_entries() {
-    local grub_file="${1:-/tmp/grub_matrix_check.cfg}"
+    local grub_file="${1:-$GRUB_CHECK_CFG}"
     grep -c "^menuentry " "$grub_file" 2>/dev/null || echo "0"
+}
+
+# Parse menu entries into ENTRY_TITLES and ENTRY_CLASSES arrays (1-indexed)
+parse_menu_entries() {
+    local grub_file="${1:-$GRUB_CHECK_CFG}"
+    ENTRY_TITLES=()
+    ENTRY_CLASSES=()
+    local idx=0
+    while IFS= read -r line; do
+        local title
+        title=$(echo "$line" | sed -n "s/.*menuentry[[:space:]]*'\([^']*\)'.*/\1/p")
+        local classes
+        classes=$(echo "$line" | grep -oE '\-\-class[[:space:]]+[a-z0-9_-]+' | awk '{print $2}' | tr '\n' ' ')
+        ENTRY_TITLES[idx]="$title"
+        ENTRY_CLASSES[idx]="$classes"
+        idx=$((idx+1))
+    done < <(grep "^menuentry " "$grub_file" 2>/dev/null | head -10)
+}
+
+# Check if entry looks like Linux (has gnu-linux or distro class)
+entry_is_linux() {
+    local classes="$1"
+    local title="$2"
+    [[ "$classes" == *"gnu-linux"* ]] && return 0
+    [[ "$classes" == *"debian"* ]] && return 0
+    [[ "$classes" == *"arch"* ]] && return 0
+    [[ "$classes" == *"ubuntu"* ]] && return 0
+    [[ "$classes" == *"linux"* ]] && return 0
+    [[ "$title" =~ [Ll]inux ]] && return 0
+    [[ "$title" =~ [Dd]ebian ]] && return 0
+    [[ "$title" =~ [Uu]buntu ]] && return 0
+    [[ "$title" =~ [Aa]rch ]] && return 0
+    return 1
+}
+
+# Check if entry looks like Windows
+entry_is_windows() {
+    local classes="$1"
+    local title="$2"
+    [[ "$classes" == *"windows"* ]] && return 0
+    [[ "$classes" == *"win"* ]] && return 0
+    [[ "$title" =~ [Ww]indows ]] && return 0
+    return 1
+}
+
+# Get first usable class for icon (skip gnu, os)
+get_primary_class() {
+    local classes="$1"
+    for cls in $classes; do
+        case "$cls" in
+            gnu|os) ;;
+            *) echo "$cls"; return ;;
+        esac
+    done
 }
 
 # Generate placeholder grub.d script
@@ -109,122 +143,296 @@ echo "menuentry 'Linux (Matrix placeholder)' --class linux --class gnu-linux --c
 SCRIPT_END
 }
 
+# Apply resolution to theme.txt (scale icons for 2K/4K)
+apply_resolution_to_theme() {
+    local res="$1"
+    local theme_file="$2"
+    local iw ih
+    case "$res" in
+        1280x720)  iw=1280;  ih=720  ;;
+        1920x1080) iw=1920;  ih=1080 ;;
+        2560x1440) iw=2560;  ih=1440 ;;
+        3840x2160) iw=3840;  ih=2160 ;;
+        *) return ;;  # auto - use default
+    esac
+    sed -i "s/icon_width = [0-9]*/icon_width = $iw/" "$theme_file"
+    sed -i "s/icon_height = [0-9]*/icon_height = $ih/" "$theme_file"
+    sed -i "s/item_height = [0-9]*/item_height = $ih/" "$theme_file"
+}
+
 echo "Detecting system configuration..."
-# Preview grub config
-grub-mkconfig 2>/dev/null > /tmp/grub_matrix_check.cfg || true
+grub-mkconfig 2>/dev/null > "$GRUB_CHECK_CFG" || true
 
-# Ask user: auto-detect or manual
+ENTRY_COUNT=$(count_menu_entries "$GRUB_CHECK_CFG")
+
+# Check: theme is designed for exactly 2 choices
+if [ "$ENTRY_COUNT" -gt 2 ]; then
+    echo ""
+    echo "----------------------------------------"
+    echo "  This theme supports only 2 boot entries"
+    echo "----------------------------------------"
+    echo ""
+    echo "You currently have $ENTRY_COUNT menu entries (e.g. multiple distros,"
+    echo "UEFI Firmware Settings, Advanced options, etc.)."
+    echo ""
+    echo "This Matrix theme is designed for choosing between exactly TWO options:"
+    echo "  - Your Linux distribution"
+    echo "  - Windows"
+    echo ""
+    echo "Please reduce your GRUB menu to 2 entries by editing:"
+    echo "  - /etc/default/grub (e.g. GRUB_DISABLE_OS_PROBER, GRUB_DISABLE_RECOVERY)"
+    echo "  - Scripts in /etc/grub.d/ (disable or remove unwanted entries)"
+    echo ""
+    echo "Then run: sudo update-grub  (or grub-mkconfig -o /boot/grub/grub.cfg)"
+    echo "After that, run this installer again."
+    echo ""
+    rm -f "$GRUB_CHECK_CFG"
+    exit 1
+fi
+
+# Screen resolution
 echo ""
-echo "How do you want to select the Linux distribution for icons?"
-echo "  1) Auto-detect (recommended)"
-echo "  2) Select manually"
-echo -n "Enter choice [1]: "
-read -r choice
-choice="${choice:-1}"
+echo "Select your display resolution for GRUB (fixes small/big loader):"
+echo "  1) HD        (1280x720)"
+echo "  2) Full HD   (1920x1080)"
+echo "  3) 2K        (2560x1440)"
+echo "  4) 4K        (3840x2160)"
+echo -n "Enter choice [2]: "
+read -r res_choice
+res_choice="${res_choice:-2}"
 
-SELECTED_DISTRO=""
-SELECTED_ICON_ON=""
-SELECTED_ICON_OFF=""
-LINUX_CLASS=""
+case "$res_choice" in
+    1) GRUB_GFXMODE="1280x720x24,auto"  ; RES_FOR_THEME="1280x720"  ;;
+    2) GRUB_GFXMODE="1920x1080x24,auto" ; RES_FOR_THEME="1920x1080" ;;
+    3) GRUB_GFXMODE="2560x1440x24,1920x1080x24,auto" ; RES_FOR_THEME="2560x1440" ;;
+    4) GRUB_GFXMODE="3840x2160x24,1920x1080x24,auto" ; RES_FOR_THEME="3840x2160" ;;
+    *) GRUB_GFXMODE="1920x1080x24,auto" ; RES_FOR_THEME="1920x1080" ;;
+esac
 
-if [ "$choice" = "2" ]; then
-    # Manual selection
-    echo ""
-    echo "Available distributions (with icons in Matrix/icons/):"
-    list_available_distros
-    echo ""
-    echo -n "Enter number: "
-    read -r num
-    if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#DISTROS_ARR[@]}" ]; then
-        SELECTED_DISTRO="${DISTROS_ARR[$((num-1))]}"
-        while IFS='|' read -r kw io iof; do
-            [[ "$kw" == "$SELECTED_DISTRO" ]] && SELECTED_ICON_ON="$io" && SELECTED_ICON_OFF="$iof" && break
-        done < "$DISTROS_CONF"
-        LINUX_CLASS="$SELECTED_DISTRO"
+# Identify Linux and Windows entries (when we have 2)
+LINUX_ENTRY_NUM=""
+WINDOWS_ENTRY_NUM=""
+LINUX_ENTRY_CLASS=""
+WINDOWS_ENTRY_CLASS=""
+
+if [ "$ENTRY_COUNT" -eq 2 ]; then
+    parse_menu_entries "$GRUB_CHECK_CFG"
+    ENTRY1_TITLE="${ENTRY_TITLES[0]:-}"
+    ENTRY1_CLASSES="${ENTRY_CLASSES[0]:-}"
+    ENTRY2_TITLE="${ENTRY_TITLES[1]:-}"
+    ENTRY2_CLASSES="${ENTRY_CLASSES[1]:-}"
+    
+    # Auto-detect
+    if entry_is_linux "$ENTRY1_CLASSES" "$ENTRY1_TITLE" && entry_is_windows "$ENTRY2_CLASSES" "$ENTRY2_TITLE"; then
+        LINUX_ENTRY_NUM=1
+        WINDOWS_ENTRY_NUM=2
+        LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+        WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY2_CLASSES")
+        LINUX_ENTRY_CLASS="${LINUX_ENTRY_CLASS:-$LINUX_CLASS}"
+        WINDOWS_ENTRY_CLASS="${WINDOWS_ENTRY_CLASS:-windows}"
+        echo "Auto-detected: Entry 1 = Linux ($ENTRY1_TITLE), Entry 2 = Windows ($ENTRY2_TITLE)"
+    elif entry_is_windows "$ENTRY1_CLASSES" "$ENTRY1_TITLE" && entry_is_linux "$ENTRY2_CLASSES" "$ENTRY2_TITLE"; then
+        LINUX_ENTRY_NUM=2
+        WINDOWS_ENTRY_NUM=1
+        LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY2_CLASSES")
+        WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+        LINUX_ENTRY_CLASS="${LINUX_ENTRY_CLASS:-$LINUX_CLASS}"
+        WINDOWS_ENTRY_CLASS="${WINDOWS_ENTRY_CLASS:-windows}"
+        echo "Auto-detected: Entry 1 = Windows ($ENTRY1_TITLE), Entry 2 = Linux ($ENTRY2_TITLE)"
     else
-        echo "Invalid choice. Using auto-detect."
-        choice="1"
+        # Ask user
+        echo ""
+        echo "Could not auto-detect which entry is Linux and which is Windows."
+        echo ""
+        echo "Menu entries:"
+        echo "  1) $ENTRY1_TITLE"
+        echo "  2) $ENTRY2_TITLE"
+        echo ""
+        echo -n "Which entry is Linux? Enter number [1]: "
+        read -r linux_num
+        linux_num="${linux_num:-1}"
+        echo -n "Which entry is Windows? Enter number [2]: "
+        read -r win_num
+        win_num="${win_num:-2}"
+        
+        if [ "$linux_num" = "1" ] && [ "$win_num" = "2" ]; then
+            LINUX_ENTRY_NUM=1
+            WINDOWS_ENTRY_NUM=2
+            LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+            WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY2_CLASSES")
+        elif [ "$linux_num" = "2" ] && [ "$win_num" = "1" ]; then
+            LINUX_ENTRY_NUM=2
+            WINDOWS_ENTRY_NUM=1
+            LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY2_CLASSES")
+            WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+        else
+            echo "Using defaults. Entry 1 = Linux, Entry 2 = Windows."
+            LINUX_ENTRY_NUM=1
+            WINDOWS_ENTRY_NUM=2
+            LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+            WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY2_CLASSES")
+        fi
+        LINUX_ENTRY_CLASS="${LINUX_ENTRY_CLASS:-gnu-linux}"
+        WINDOWS_ENTRY_CLASS="${WINDOWS_ENTRY_CLASS:-windows}"
+    fi
+elif [ "$ENTRY_COUNT" -eq 1 ]; then
+    parse_menu_entries "$GRUB_CHECK_CFG"
+    ENTRY1_TITLE="${ENTRY_TITLES[0]:-}"
+    ENTRY1_CLASSES="${ENTRY_CLASSES[0]:-}"
+    if entry_is_linux "$ENTRY1_CLASSES" "$ENTRY1_TITLE"; then
+        LINUX_ENTRY_NUM=1
+        LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+        LINUX_ENTRY_CLASS="${LINUX_ENTRY_CLASS:-gnu-linux}"
+    elif entry_is_windows "$ENTRY1_CLASSES" "$ENTRY1_TITLE"; then
+        WINDOWS_ENTRY_NUM=1
+        WINDOWS_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+        WINDOWS_ENTRY_CLASS="${WINDOWS_ENTRY_CLASS:-windows}"
+    else
+        echo ""
+        echo "Could not identify the single boot entry. Is it Linux or Windows?"
+        echo "  1) $ENTRY1_TITLE"
+        echo ""
+        echo -n "Enter 1 for Linux, 2 for Windows [1]: "
+        read -r ident
+        ident="${ident:-1}"
+        if [ "$ident" = "2" ]; then
+            WINDOWS_ENTRY_NUM=1
+            WINDOWS_ENTRY_CLASS="windows"
+        else
+            LINUX_ENTRY_NUM=1
+            LINUX_ENTRY_CLASS=$(get_primary_class "$ENTRY1_CLASSES")
+            LINUX_ENTRY_CLASS="${LINUX_ENTRY_CLASS:-gnu-linux}"
+        fi
     fi
 fi
 
-if [ "$choice" = "1" ] || [ -z "$SELECTED_DISTRO" ]; then
-    # Auto-detect
-    system_id=$(get_system_distro_id)
-    match=$(find_distro_match "$system_id")
+# Find Linux distro for icons: auto-detect from entry class/title and system, ask only if not found
+SELECTED_DISTRO=""
+SELECTED_ICON_ON=""
+SELECTED_ICON_OFF=""
+
+if [ -n "$LINUX_ENTRY_NUM" ]; then
+    # Search string: Linux entry class + title + system id
+    if [ "$LINUX_ENTRY_NUM" = "1" ]; then
+        search_str="${LINUX_ENTRY_CLASS:-} ${ENTRY1_TITLE:-} ${ENTRY1_CLASSES:-}"
+    else
+        search_str="${LINUX_ENTRY_CLASS:-} ${ENTRY2_TITLE:-} ${ENTRY2_CLASSES:-}"
+    fi
+    search_str="${search_str} $(get_system_distro_id)"
+    search_str=$(echo "$search_str" | tr 'A-Z' 'a-z')
+
+    match=$(find_distro_match "$search_str")
     if [ -n "$match" ]; then
         SELECTED_DISTRO=$(echo "$match" | cut -d'|' -f1)
         SELECTED_ICON_ON=$(echo "$match" | cut -d'|' -f2)
         SELECTED_ICON_OFF=$(echo "$match" | cut -d'|' -f3)
-        LINUX_CLASS=$(get_linux_class_from_grub /tmp/grub_matrix_check.cfg)
-        LINUX_CLASS="${LINUX_CLASS:-$SELECTED_DISTRO}"
-        echo "Detected: $SELECTED_DISTRO (using icons: $SELECTED_ICON_ON / $SELECTED_ICON_OFF)"
+        echo "Found Linux: $SELECTED_DISTRO"
     else
-        echo "No matching distro found. Using linux_template.png as fallback."
-        LINUX_CLASS=$(get_linux_class_from_grub /tmp/grub_matrix_check.cfg)
-        LINUX_CLASS="${LINUX_CLASS:-gnu-linux}"
+        echo ""
+        echo "Could not identify the Linux distribution. Please select which icons to use:"
+        list_available_distros
+        echo ""
+        echo -n "Enter number: "
+        read -r num
+        if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le "${#DISTROS_ARR[@]}" ]; then
+            SELECTED_DISTRO="${DISTROS_ARR[$((num-1))]}"
+            while IFS='|' read -r kw io iof; do
+                [[ "$kw" == "$SELECTED_DISTRO" ]] && SELECTED_ICON_ON="$io" && SELECTED_ICON_OFF="$iof" && break
+            done < "$DISTROS_CONF"
+        else
+            echo "Using linux_template.png as fallback."
+        fi
     fi
 fi
 
-# Ensure theme directory exists
+# Install theme
 echo ""
 echo "Installing theme..."
 mkdir -p "$THEME_DIR"
-
-# Copy theme (excluding icons - we'll set them up)
 rm -rf "${THEME_DIR}/${THEME_NAME}"
 cp -r "$THEME_NAME" "$THEME_DIR/"
 ICONS_DST="${THEME_DIR}/${THEME_NAME}/icons"
 mkdir -p "$ICONS_DST"
 
-# Prepare Linux icon
+# Apply resolution to theme if needed
+if [ -n "$RES_FOR_THEME" ]; then
+    apply_resolution_to_theme "$RES_FOR_THEME" "${THEME_DIR}/${THEME_NAME}/theme.txt"
+fi
+
+# Prepare Linux icon(s)
+LINUX_ICON_CLASS="${LINUX_ENTRY_CLASS:-$LINUX_CLASS}"
 if [ -n "$SELECTED_ICON_ON" ] && [ -f "${ICONS_SRC}/${SELECTED_ICON_ON}" ]; then
-    cp "${ICONS_SRC}/${SELECTED_ICON_ON}" "${ICONS_DST}/${LINUX_CLASS}.png"
-    echo "  Linux icon: ${LINUX_CLASS}.png (from $SELECTED_ICON_ON)"
+    cp "${ICONS_SRC}/${SELECTED_ICON_ON}" "${ICONS_DST}/${LINUX_ICON_CLASS}.png"
+    echo "  Linux icon: ${LINUX_ICON_CLASS}.png (from $SELECTED_ICON_ON)"
 else
-    # Fallback to template
     if [ -f "${ASSETS_DIR}/linux_template.png" ]; then
-        cp "${ASSETS_DIR}/linux_template.png" "${ICONS_DST}/${LINUX_CLASS}.png"
+        cp "${ASSETS_DIR}/linux_template.png" "${ICONS_DST}/${LINUX_ICON_CLASS}.png"
         cp "${ASSETS_DIR}/linux_template.png" "${ICONS_DST}/gnu-linux.png"
-        echo "  Linux icon: ${LINUX_CLASS}.png (fallback: linux_template.png)"
+        echo "  Linux icon: ${LINUX_ICON_CLASS}.png (fallback: linux_template.png)"
     fi
 fi
 
-# Prepare Windows icon
-if [ -f "${ASSETS_DIR}/windows_template.png" ]; then
-    cp "${ASSETS_DIR}/windows_template.png" "${ICONS_DST}/windows.png"
-    echo "  Windows icon: windows.png (from windows_template.png)"
-elif [ -f "${ICONS_SRC}/windows_on.png" ]; then
-    cp "${ICONS_SRC}/windows_on.png" "${ICONS_DST}/windows.png"
-else
-    # Copy all icons from source (may have windows)
-    for f in "${ICONS_SRC}"/*.png; do
-        [ -f "$f" ] && cp "$f" "$ICONS_DST/"
-    done
+# Prepare Windows icon: use _off from same distro (opposite pill), fallback to template
+if [ -n "$WINDOWS_ENTRY_CLASS" ]; then
+    if [ -n "$SELECTED_ICON_OFF" ] && [ -f "${ICONS_SRC}/${SELECTED_ICON_OFF}" ]; then
+        cp "${ICONS_SRC}/${SELECTED_ICON_OFF}" "${ICONS_DST}/${WINDOWS_ENTRY_CLASS}.png"
+        echo "  Windows icon: ${WINDOWS_ENTRY_CLASS}.png (from $SELECTED_ICON_OFF)"
+    elif [ -f "${ASSETS_DIR}/windows_template.png" ]; then
+        cp "${ASSETS_DIR}/windows_template.png" "${ICONS_DST}/${WINDOWS_ENTRY_CLASS}.png"
+        echo "  Windows icon: ${WINDOWS_ENTRY_CLASS}.png (from windows_template.png)"
+    fi
+fi
+if [ ! -f "${ICONS_DST}/windows.png" ]; then
+    if [ -n "$SELECTED_ICON_OFF" ] && [ -f "${ICONS_SRC}/${SELECTED_ICON_OFF}" ]; then
+        cp "${ICONS_SRC}/${SELECTED_ICON_OFF}" "${ICONS_DST}/windows.png"
+        echo "  Windows icon: windows.png (from $SELECTED_ICON_OFF)"
+    elif [ -f "${ASSETS_DIR}/windows_template.png" ]; then
+        cp "${ASSETS_DIR}/windows_template.png" "${ICONS_DST}/windows.png"
+    elif [ -f "${ICONS_SRC}/windows_on.png" ]; then
+        cp "${ICONS_SRC}/windows_on.png" "${ICONS_DST}/windows.png"
+    fi
 fi
 
-# Ensure we have gnu-linux fallback
-if [ ! -f "${ICONS_DST}/gnu-linux.png" ] && [ -f "${ICONS_DST}/${LINUX_CLASS}.png" ]; then
-    cp "${ICONS_DST}/${LINUX_CLASS}.png" "${ICONS_DST}/gnu-linux.png"
+# Ensure gnu-linux fallback
+if [ ! -f "${ICONS_DST}/gnu-linux.png" ] && [ -f "${ICONS_DST}/${LINUX_ICON_CLASS}.png" ]; then
+    cp "${ICONS_DST}/${LINUX_ICON_CLASS}.png" "${ICONS_DST}/gnu-linux.png"
 fi
 
-# Add placeholder if only one entry (Windows only or no entries)
-ENTRY_COUNT=$(count_menu_entries /tmp/grub_matrix_check.cfg)
+# Hide "Loading Linux..." and blue Debian background during boot
+BLACK_PNG="${THEME_DIR}/${THEME_NAME}/black.png"
+if [ -f "${ASSETS_DIR}/black.png" ]; then
+    cp "${ASSETS_DIR}/black.png" "$BLACK_PNG"
+fi
+if [ -f "$BLACK_PNG" ]; then
+    if grep -q '^GRUB_BACKGROUND=' "$GRUB_CFG"; then
+        sed -i "s|^GRUB_BACKGROUND=.*|GRUB_BACKGROUND=\"${BLACK_PNG}\"|" "$GRUB_CFG"
+    else
+        echo "GRUB_BACKGROUND=\"${BLACK_PNG}\"" >> "$GRUB_CFG"
+    fi
+    echo "  Boot transition: black background (hides Debian blue)"
+fi
+for linux_script in /etc/grub.d/proxifiedScripts/linux /etc/grub.d/10_linux; do
+    if [ -f "$linux_script" ] && grep -q 'quiet_boot="0"' "$linux_script" 2>/dev/null; then
+        sed -i 's/quiet_boot="0"/quiet_boot="1"/' "$linux_script"
+        echo "  Boot transition: quiet mode (hides Loading... messages)"
+        break
+    fi
+done 2>/dev/null || true
 
+# Placeholder for 1 or 0 entries
 if [ "$ENTRY_COUNT" -le 1 ]; then
     echo ""
     echo "Adding placeholder entry for two-option layout..."
     create_placeholder_script > /etc/grub.d/06_matrix_placeholder
     chmod +x /etc/grub.d/06_matrix_placeholder
-    # Ensure linux placeholder icon exists
     if [ ! -f "${ICONS_DST}/linux.png" ] && [ -f "${ASSETS_DIR}/linux_template.png" ]; then
         cp "${ASSETS_DIR}/linux_template.png" "${ICONS_DST}/linux.png"
     fi
 else
-    # Remove placeholder script if we have enough entries
     rm -f /etc/grub.d/06_matrix_placeholder
 fi
 
-# Configure GRUB to use the theme
+# Configure GRUB
 echo ""
 echo "Updating GRUB configuration..."
 if grep -q '^GRUB_THEME=' "$GRUB_CFG"; then
@@ -232,6 +440,16 @@ if grep -q '^GRUB_THEME=' "$GRUB_CFG"; then
 else
     echo "" >> "$GRUB_CFG"
     echo "GRUB_THEME=\"${THEME_DIR}/${THEME_NAME}/theme.txt\"" >> "$GRUB_CFG"
+fi
+
+# Set GRUB_GFXMODE
+if grep -q '^GRUB_GFXMODE=' "$GRUB_CFG"; then
+    sed -i "s|^GRUB_GFXMODE=.*|GRUB_GFXMODE=\"${GRUB_GFXMODE}\"|" "$GRUB_CFG"
+else
+    echo "GRUB_GFXMODE=\"${GRUB_GFXMODE}\"" >> "$GRUB_CFG"
+fi
+if ! grep -q '^GRUB_GFXPAYLOAD_LINUX=' "$GRUB_CFG"; then
+    echo "GRUB_GFXPAYLOAD_LINUX=keep" >> "$GRUB_CFG"
 fi
 
 # Regenerate GRUB
@@ -244,8 +462,7 @@ else
     exit 1
 fi
 
-# Cleanup
-rm -f /tmp/grub_matrix_check.cfg
+rm -f "$GRUB_CHECK_CFG"
 
 echo ""
 echo "Installation complete!"
