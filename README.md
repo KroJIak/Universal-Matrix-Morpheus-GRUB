@@ -54,8 +54,8 @@ These templates are used as fallback when no dedicated icons exist for your dist
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/YOUR_USER/Universal-Matrix-Morpheus-GRUB
-   cd Universal-Matrix-Morpheus-GRUB
+   git clone https://github.com/KroJIak/universal-matrix-morpheus-grub
+   cd universal-matrix-morpheus-grub
    ```
 
 2. Make the script executable:

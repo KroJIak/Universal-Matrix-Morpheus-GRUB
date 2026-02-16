@@ -54,8 +54,8 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/YOUR_USER/Universal-Matrix-Morpheus-GRUB
-   cd Universal-Matrix-Morpheus-GRUB
+   git clone https://github.com/KroJIak/universal-matrix-morpheus-grub
+   cd universal-matrix-morpheus-grub
    ```
 
 2. Сделайте скрипт исполняемым:
